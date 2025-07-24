@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { io } from 'socket.io-client';
+import logo from './assets/logo.png';
 
 // --- Custom Piece Data Structure ---
 // { id, type, color, positions: [square, ...], entangledWith: [id, ...] }
@@ -517,9 +519,13 @@ const HeroSection = ({ onDirectGuestPlay, onLoginAndPlay, onCreateAccount }) => 
     <div className="relative min-h-screen w-full flex flex-col items-center justify-center p-4 text-white overflow-hidden bg-black">
       <AnimatedHero />
       <div className="relative z-10 flex flex-col items-center text-center">
-        <h1 className="text-5xl md:text-7xl font-bold text-cyan-300 drop-shadow-[0_0_15px_rgba(0,255,255,0.4)]">
-          Quantum Chess
-        </h1>
+        <div className="mb-2">
+          <img 
+            src={logo} 
+            alt="Quantum Chess" 
+            className="h-34 md:h-64 w-auto drop-shadow-[0_0_15px_rgba(0,255,255,0.4)]"
+          />
+        </div>
         <p className="mt-4 text-lg md:text-xl text-gray-300 max-w-2xl">
           Where strategy meets probability. Bend the rules of reality and outmaneuver your opponent in a game of infinite possibilities.
         </p>
@@ -769,13 +775,14 @@ const UserStats = ({ user, stats, onRefresh }) => {
 };
 
 // --- Game History Component ---
-const GameHistory = ({ games, onGameClick, onLoadMore, hasMore }) => {
+const GameHistory = ({ games, onGameClick, onLoadMore, hasMore, user }) => {
   const formatDate = (dateString) => {
     const date = new Date(dateString);
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
   const getGameResult = (game, userId) => {
+    if (!userId) return 'Unknown';
     const player = game.players.find(p => p.userId === userId);
     if (!player) return 'Unknown';
     return player.isWinner ? 'Victory' : 'Defeat';
@@ -1044,7 +1051,21 @@ export default function App() {
   const [gameOver, setGameOver] = useState(false);
   const [gameOverMessage, setGameOverMessage] = useState('');
 
-
+  // Lobby state
+  const [showLobby, setShowLobby] = useState(false);
+  const [socket, setSocket] = useState(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [availableGames, setAvailableGames] = useState([]);
+  const [myGames, setMyGames] = useState([]);
+  const [isCreatingGame, setIsCreatingGame] = useState(false);
+  const [isJoiningGame, setIsJoiningGame] = useState(false);
+  const [isMatchmaking, setIsMatchmaking] = useState(false);
+  const [gameId, setGameId] = useState(null);
+  const [playerColor, setPlayerColor] = useState(null);
+  const [opponent, setOpponent] = useState(null);
+  const [isMyTurn, setIsMyTurn] = useState(false);
+  const [gameStarted, setGameStarted] = useState(false);
+  const [showGame, setShowGame] = useState(false);
 
   // --- Improved Move Generation ---
   function getLegalMoves(piece, from, board = pieces, ignoreCheck = false) {
@@ -1160,15 +1181,15 @@ export default function App() {
         while (f >= 0 && f < 8 && r >= 0 && r < 8) {
           const dest = `${files[f]}${ranks[r]}`;
           const targetPiece = board.find(p => p.positions.includes(dest));
-          if (!targetPiece) {
-            moves.push(dest);
+            if (!targetPiece) {
+              moves.push(dest);
           } else {
             if (targetPiece.color !== piece.color) moves.push(dest);
             break;
-          }
+            }
           f += df;
           r += dr;
-        }
+          }
       }
     } else if (piece.type === 'q') {
       // Queen: combine rook and bishop logic
@@ -1187,8 +1208,8 @@ export default function App() {
         for (let i = rankIdx + dir; i >= 0 && i < 8; i += dir) {
           const dest = `${from[0]}${ranks[i]}`;
           const targetPiece = board.find(p => p.positions.includes(dest));
-          if (!targetPiece) {
-            moves.push(dest);
+            if (!targetPiece) {
+              moves.push(dest);
           } else {
             if (targetPiece.color !== piece.color) moves.push(dest);
             break;
@@ -1204,14 +1225,14 @@ export default function App() {
           const dest = `${files[f]}${ranks[r]}`;
           const targetPiece = board.find(p => p.positions.includes(dest));
           if (!targetPiece) {
-            moves.push(dest);
+              moves.push(dest);
           } else {
             if (targetPiece.color !== piece.color) moves.push(dest);
             break;
-          }
+            }
           f += df;
           r += dr;
-        }
+          }
       }
     } else if (piece.type === 'k') {
       // King moves: one square in any direction
@@ -1514,7 +1535,7 @@ export default function App() {
         // In handleSquareClick, when a pawn moves two squares, set enPassantTarget
         if (movedPiece && movedPiece.type === 'p' && Math.abs(selected[1] - square[1]) === 2) {
           setEnPassantTarget(square);
-        } else {
+      } else {
           setEnPassantTarget(null);
         }
       } else {
@@ -1723,7 +1744,9 @@ export default function App() {
         localStorage.setItem('accessToken', data.data.tokens.accessToken);
         localStorage.setItem('refreshToken', data.data.tokens.refreshToken);
         setIsAuthModalOpen(false);
-        setShowHero(false); // Take user to game page after login
+        setShowHero(false);
+        setShowLobby(true); // Take user to lobby after login
+        setIsGuestMode(false);
         setMessage('Login successful!');
         loadUserStats();
         loadGameHistory();
@@ -1750,7 +1773,9 @@ export default function App() {
         localStorage.setItem('accessToken', data.data.tokens.accessToken);
         localStorage.setItem('refreshToken', data.data.tokens.refreshToken);
         setIsAuthModalOpen(false);
-        setShowHero(false); // Take user to game page after signup
+        setShowHero(false);
+        setShowLobby(true); // Take user to lobby after signup
+        setIsGuestMode(false);
         setMessage('Signup successful!');
         loadUserStats();
         loadGameHistory();
@@ -1782,6 +1807,7 @@ export default function App() {
   const handleDirectGuestPlay = () => {
     setIsGuestMode(true);
     setShowHero(false);
+    setShowLobby(true); // Guest users also go to lobby
   };
 
   const handleLoginAndPlay = () => {
@@ -1798,11 +1824,51 @@ export default function App() {
     setIsGuestMode(true);
     setIsPlayOptionsModalOpen(false);
     setShowHero(false);
+    setShowLobby(true); // Guest users go to lobby
   };
 
   const handlePlayOptionsLogin = () => {
     setIsPlayOptionsModalOpen(false);
     setIsAuthModalOpen(true);
+  };
+
+  // Lobby handlers
+  const handleCreateGame = () => {
+    setIsCreatingGame(true);
+    const username = user ? user.name : 'Guest_' + Math.random().toString(36).substr(2, 9);
+    socket.emit('createGame', { username });
+  };
+
+  const handleJoinGame = (gameId) => {
+    setIsJoiningGame(true);
+    const username = user ? user.name : 'Guest_' + Math.random().toString(36).substr(2, 9);
+    socket.emit('joinGame', { gameId, username });
+  };
+
+  const handleQuickMatch = () => {
+    setIsMatchmaking(true);
+    const username = user ? user.name : 'Guest_' + Math.random().toString(36).substr(2, 9);
+    socket.emit('findMatch', { username });
+  };
+
+  const handleBackToLobby = () => {
+    setShowGame(false);
+    setShowLobby(true);
+    resetGame();
+  };
+
+  const handlePlayWithComputer = () => {
+    setPlayWithAI(true);
+    setShowLobby(false);
+    setShowGame(true);
+    resetGame();
+  };
+
+  const handleSoloPlay = () => {
+    setPlayWithAI(false);
+    setShowLobby(false);
+    setShowGame(true);
+    resetGame();
   };
 
   // --- API Functions ---
@@ -1883,7 +1949,9 @@ export default function App() {
       .then(data => {
         if (data.success) {
           setUser(data.data.user);
-          setShowHero(false); // Go directly to game if user is logged in
+          setShowHero(false);
+          setShowLobby(true); // Go directly to lobby if user is logged in
+          setIsGuestMode(false);
         }
       })
       .catch(() => {
@@ -1901,6 +1969,89 @@ export default function App() {
       loadGameHistory();
     }
   }, [user]);
+
+  // Socket connection for multiplayer
+  useEffect(() => {
+    if (showLobby) {
+      const newSocket = io('http://localhost:3001');
+      setSocket(newSocket);
+
+      newSocket.on('connect', () => {
+        console.log('Connected to server');
+        setIsConnected(true);
+        if (user) {
+          newSocket.emit('login', { username: user.name });
+        } else {
+          newSocket.emit('login', { username: 'Guest_' + Math.random().toString(36).substr(2, 9) });
+        }
+      });
+
+      newSocket.on('disconnect', () => {
+        console.log('Disconnected from server');
+        setIsConnected(false);
+      });
+
+      // Game events
+      newSocket.on('gameCreated', (data) => {
+        console.log('Game created:', data);
+        setGameId(data.gameId);
+        setPlayerColor(data.playerColor);
+        setShowLobby(false);
+        setShowGame(true);
+      });
+
+      newSocket.on('gameJoined', (data) => {
+        console.log('Game joined:', data);
+        setGameId(data.gameId);
+        setPlayerColor(data.playerColor);
+        setOpponent(data.opponent);
+        setShowLobby(false);
+        setShowGame(true);
+      });
+
+      newSocket.on('gameStarted', (data) => {
+        console.log('Game started:', data);
+        setGameStarted(true);
+        setIsMyTurn(data.startingPlayer === playerColor);
+      });
+
+      newSocket.on('moveMade', (data) => {
+        console.log('Move received:', data);
+        setPieces(data.board);
+        setTurn(data.currentPlayer);
+        setIsMyTurn(data.currentPlayer === playerColor);
+        setMoveHistory(data.moveHistory);
+      });
+
+      newSocket.on('opponentLeft', () => {
+        alert('Your opponent has left the game');
+        setShowGame(false);
+        setShowLobby(true);
+        resetGame();
+      });
+
+      // Lobby events
+      newSocket.on('availableGames', (games) => {
+        setAvailableGames(games);
+      });
+
+      newSocket.on('myGames', (games) => {
+        setMyGames(games);
+      });
+
+      return () => {
+        newSocket.close();
+      };
+    }
+  }, [user, showLobby, playerColor]);
+
+  // Request lobby data when connected
+  useEffect(() => {
+    if (socket && isConnected && showLobby) {
+      socket.emit('getAvailableGames');
+      socket.emit('getMyGames');
+    }
+  }, [socket, isConnected, showLobby]);
 
   // --- Utility: Check if king is in check ---
   function isKingInCheck(pieces, color) {
@@ -2057,15 +2208,280 @@ export default function App() {
     );
   }
 
+  if (showLobby) {
+    return (
+      <>
+        <div className="min-h-screen bg-cyan-900 from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-8">
+          <AnimatedHero />
+          <div className="relative z-10 max-w-7xl w-full">
+            <div className="text-center mb-8">
+            <div className="flex justify-center mb-2">
+                <img 
+                  src={logo} 
+                  alt="Quantum Chess" 
+                  className="h-34 md:h-64 w-auto drop-shadow-[0_0_15px_rgba(0,255,255,0.4)]"
+                />
+              </div>
+              <h1 className="text-5xl font-bold bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent mb-2">
+                Lobby
+              </h1>
+              <p className="text-gray-300 text-lg">Choose your game mode and start playing</p>
+            </div>
+            
+            {/* Header with user info */}
+            <div className="flex justify-between items-center mb-8">
+              <div className="flex items-center space-x-4">
+                <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`}></div>
+                <span className="text-white">
+                  {user ? user.name : 'Guest Player'}
+                </span>
+                {user && (
+                  <button
+                    onClick={handleLogout}
+                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+                  >
+                    Logout
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Connection Status */}
+            {!isConnected && (
+              <div className="bg-red-500 text-white p-4 rounded-lg mb-6">
+                Connecting to server...
+              </div>
+            )}
+
+            <div className="flex flex-row items-start justify-center gap-8">
+              {/* Left Side - User Details and Profile */}
+              <div className="flex flex-col gap-6">
+                {/* User Profile Section */}
+                {user ? (
+                  <ProfileSection 
+                    user={user} 
+                    onLogout={handleLogout} 
+                    stats={userStats}
+                    onRefreshStats={handleRefreshStats}
+                    onShowStats={() => setShowStatsModal(true)}
+                  />
+                ) : (
+                  <div className="bg-white/10 backdrop-blur-sm rounded-2xl shadow-2xl border border-white/20 p-6 w-80">
+                    <h3 className="text-2xl font-bold text-white mb-4">Guest Mode</h3>
+                    <div className="mb-6">
+                      <div className="flex items-center mb-4">
+                        <div className="w-12 h-12 bg-gray-500 rounded-full flex items-center justify-center text-white font-bold text-xl mr-4">
+                          🎮
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-white font-semibold">Guest Player</div>
+                          <div className="text-gray-400 text-sm">Playing without account</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-4">
+                      <button
+                        onClick={() => {
+                          setAuthModalMode('signup');
+                          setIsAuthModalOpen(true);
+                        }}
+                        className="w-full py-3 px-4 bg-cyan-600 hover:bg-cyan-700 text-white font-semibold rounded-lg transition-all duration-300"
+                      >
+                        🔐 Create Account
+                      </button>
+                      
+                      <button
+                        onClick={() => {
+                          setAuthModalMode('login');
+                          setIsAuthModalOpen(true);
+                        }}
+                        className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-all duration-300"
+                      >
+                        🔑 Login
+                      </button>
+                      
+                      <button
+                        onClick={() => {
+                          setShowLobby(false);
+                          setShowHero(true);
+                        }}
+                        className="w-full py-3 px-4 bg-gray-600 hover:bg-gray-700 text-white font-semibold rounded-lg transition-all duration-300"
+                      >
+                        🚪 Back to Hero
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Connection Status */}
+                {!isConnected && (
+                  <div className="bg-red-500/20 border border-red-500/30 text-red-300 p-4 rounded-lg">
+                    <div className="flex items-center">
+                      <div className="w-3 h-3 bg-red-400 rounded-full mr-2"></div>
+                      <span>Connecting to server...</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Left Side Ad */}
+                <AdSpace position="left" size="medium" />
+              </div>
+
+              {/* Center - Lobby Table */}
+              <div className="flex-shrink-0 bg-white/10 backdrop-blur-sm rounded-2xl shadow-2xl border border-white/20 p-6 w-96">
+                <h2 className="text-2xl font-bold text-white mb-6">Available Games</h2>
+                
+                {/* Action Buttons */}
+                <div className="space-y-4 mb-6">
+                  <button
+                    onClick={handleCreateGame}
+                    disabled={isCreatingGame || !isConnected}
+                    className="w-full p-4 bg-gradient-to-r from-green-500 to-emerald-500 rounded-lg text-white font-semibold hover:from-green-600 hover:to-emerald-600 transition-all duration-200 disabled:opacity-50"
+                  >
+                    {isCreatingGame ? 'Creating Game...' : 'Create New Game'}
+                  </button>
+                  
+                  <button
+                    onClick={handleQuickMatch}
+                    disabled={isMatchmaking || !isConnected}
+                    className="w-full p-4 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg text-white font-semibold hover:from-blue-600 hover:to-cyan-600 transition-all duration-200 disabled:opacity-50"
+                  >
+                    {isMatchmaking ? 'Finding Match...' : 'Quick Match'}
+                  </button>
+                </div>
+
+                {/* Games Table */}
+                <div className="space-y-3 max-h-64 overflow-y-auto">
+                  {availableGames.length === 0 ? (
+                    <div className="text-center text-gray-400 py-8">
+                      <div className="text-4xl mb-2">🎮</div>
+                      <div>No games available</div>
+                      <div className="text-sm mt-1">Create a game or wait for others to join</div>
+                    </div>
+                  ) : (
+                    availableGames.map((game) => (
+                      <div key={game.id} className="bg-white/5 rounded-lg p-4 flex justify-between items-center border border-white/10 hover:border-white/20 transition-all duration-200">
+                        <div>
+                          <p className="text-white font-semibold">Game #{game.id}</p>
+                          <p className="text-gray-300 text-sm">Created by {game.creator}</p>
+                        </div>
+                        <button
+                          onClick={() => handleJoinGame(game.id)}
+                          disabled={isJoiningGame}
+                          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50"
+                        >
+                          {isJoiningGame ? 'Joining...' : 'Join'}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Right Side - Play Options and My Games */}
+              <div className="flex flex-col gap-6">
+                {/* Play Options */}
+                <div className="bg-white/10 backdrop-blur-sm rounded-2xl shadow-2xl border border-white/20 p-6 w-80">
+                  <h3 className="text-2xl font-bold text-white mb-4">Play Options</h3>
+                  
+                  <div className="space-y-4">
+                    <button
+                      onClick={handleCreateGame}
+                      disabled={isCreatingGame || !isConnected}
+                      className="w-full p-4 bg-gradient-to-r from-purple-500 to-pink-500 rounded-lg text-white font-semibold hover:from-purple-600 hover:to-pink-600 transition-all duration-200 disabled:opacity-50"
+                    >
+                      👥 Play with Friends
+                    </button>
+                    
+                    <button
+                      onClick={handlePlayWithComputer}
+                      className="w-full p-4 bg-gradient-to-r from-green-500 to-emerald-500 rounded-lg text-white font-semibold hover:from-green-600 hover:to-emerald-600 transition-all duration-200"
+                    >
+                      🤖 Play with Computer
+                    </button>
+                    
+                    <button
+                      onClick={handleSoloPlay}
+                      className="w-full p-4 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-lg text-white font-semibold hover:from-blue-600 hover:to-cyan-600 transition-all duration-200"
+                    >
+                      🎮 Solo Play
+                    </button>
+                    
+                    <button
+                      onClick={handleQuickMatch}
+                      disabled={isMatchmaking || !isConnected}
+                      className="w-full p-4 bg-gradient-to-r from-orange-500 to-red-500 rounded-lg text-white font-semibold hover:from-orange-600 hover:to-red-600 transition-all duration-200 disabled:opacity-50"
+                    >
+                      ⚡ Quick Match
+                    </button>
+                  </div>
+                </div>
+
+                {/* My Games - Only show for logged in users */}
+                {user && (
+                  <div className="bg-white/10 backdrop-blur-sm rounded-2xl shadow-2xl border border-white/20 p-6 w-80">
+                    <h3 className="text-xl font-bold text-white mb-4">My Games</h3>
+                    {myGames.length === 0 ? (
+                      <div className="text-center text-gray-400 py-4">
+                        <div className="text-2xl mb-2">📜</div>
+                        <div className="text-sm">No games created</div>
+                      </div>
+                    ) : (
+                      <div className="space-y-3 max-h-32 overflow-y-auto">
+                        {myGames.map((game) => (
+                          <div key={game.id} className="bg-white/5 rounded-lg p-3 border border-white/10">
+                            <p className="text-white font-semibold text-sm">Game #{game.id}</p>
+                            <p className="text-gray-300 text-xs">
+                              Status: {game.status === 'waiting' ? 'Waiting for opponent' : 'In progress'}
+                            </p>
+                            {game.status === 'waiting' && (
+                              <button
+                                onClick={() => handleJoinGame(game.id)}
+                                className="mt-2 px-3 py-1 bg-green-500 text-white rounded text-xs hover:bg-green-600 transition-colors"
+                              >
+                                Join
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Right Side Ad */}
+                <AdSpace position="right" size="medium" />
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        {/* Auth Modal for Lobby */}
+        <AuthModal
+          isOpen={isAuthModalOpen}
+          onClose={() => setIsAuthModalOpen(false)}
+          onLogin={handleLogin}
+          onSignup={handleSignup}
+          initialMode={authModalMode}
+        />
+      </>
+    );
+  }
+
   // --- Game UI ---
+  if (showGame) {
   return (
     <div className="min-h-screen bg-cyan-900 from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-8">
       <AnimatedHero />
       <div className="relative z-10 max-w-7xl w-full">
         <div className="text-center mb-8">
-          <h1 className="text-5xl font-bold bg-gradient-to-r from-cyan-400 to-purple-500 bg-clip-text text-transparent mb-2">
-            Quantum Chess
-          </h1>
+        <div className="flex justify-center mb-2">
+          <img 
+            src={logo} 
+            alt="Quantum Chess" 
+            className="h-24 md:h-32 w-auto drop-shadow-[0_0_15px_rgba(0,255,255,0.4)]"
+          />
+        </div>
           <p className="text-gray-300 text-lg">Experience chess through quantum mechanics</p>
         </div>
         
@@ -2083,8 +2499,8 @@ export default function App() {
               <button
                 onClick={() => setQuantumMode(quantumMode === 'superposition' ? null : 'superposition')}
                 className={`w-full py-3 px-4 rounded-xl font-semibold mb-3 transition-all duration-300 ${
-                  quantumMode === 'superposition'
-                    ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/50'
+                  quantumMode === 'superposition' 
+                    ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/50' 
                     : 'bg-white/20 text-white hover:bg-white/30'
                 }`}
               >
@@ -2093,8 +2509,8 @@ export default function App() {
               <button
                 onClick={() => setQuantumMode(quantumMode === 'entanglement' ? null : 'entanglement')}
                 className={`w-full py-3 px-4 rounded-xl font-semibold mb-3 transition-all duration-300 ${
-                  quantumMode === 'entanglement'
-                    ? 'bg-pink-500 text-white shadow-lg shadow-pink-500/50'
+                  quantumMode === 'entanglement' 
+                    ? 'bg-pink-500 text-white shadow-lg shadow-pink-500/50' 
                     : 'bg-white/20 text-white hover:bg-white/30'
                 }`}
               >
@@ -2175,7 +2591,7 @@ export default function App() {
               <ProfileSection 
                 user={user} 
                 onLogout={handleLogout} 
-                stats={userStats}
+                stats={userStats} 
                 onRefreshStats={handleRefreshStats}
                 onShowStats={() => setShowStatsModal(true)}
               />
@@ -2264,12 +2680,13 @@ export default function App() {
             />
             
             {/* Game History */}
-            {user && !isGuestMode && (
+            {(user || isGuestMode) && (
               <GameHistory 
                 games={gameHistory}
                 onGameClick={handleGameClick}
                 onLoadMore={handleLoadMoreGames}
                 hasMore={hasMoreGames}
+                user={user}
               />
             )}
             
@@ -2287,12 +2704,17 @@ export default function App() {
           <p>Click a piece to select, then a destination. Use quantum controls for superposition and entanglement.</p>
           <button 
             onClick={() => {
-              setShowHero(true);
-              setIsGuestMode(false);
+              if (user) {
+                setShowLobby(true);
+                setShowGame(false);
+              } else {
+                setShowHero(true);
+                setIsGuestMode(false);
+              }
             }}
             className="mt-4 px-6 py-2 bg-white/10 text-white rounded-lg hover:bg-white/20 transition-all duration-300"
           >
-            ← Back to Hero
+            {user ? '← Back to Lobby' : '← Back to Hero'}
           </button>
         </div>
       </div>
@@ -2436,4 +2858,7 @@ export default function App() {
       )}
     </div>
   );
+  }
+
+  return null;
 }
