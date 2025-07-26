@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Quantum Chess Backend Deployment Script
-# This script sets up the backend on an EC2 instance
+# This script sets up the backend on an Amazon Linux EC2 instance
 
 set -e
 
@@ -34,19 +34,25 @@ fi
 
 # Update system packages
 print_status "Updating system packages..."
-sudo apt update && sudo apt upgrade -y
+sudo yum update -y
 
 # Install Node.js and npm
 print_status "Installing Node.js and npm..."
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt-get install -y nodejs
+curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+sudo yum install -y nodejs
 
 # Install MongoDB
 print_status "Installing MongoDB..."
-wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | sudo apt-key add -
-echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
-sudo apt-get update
-sudo apt-get install -y mongodb-org
+sudo tee /etc/yum.repos.d/mongodb-org-6.0.repo << EOF
+[mongodb-org-6.0]
+name=MongoDB Repository
+baseurl=https://repo.mongodb.org/yum/amazon/2/mongodb-org/6.0/x86_64/
+gpgcheck=1
+enabled=1
+gpgkey=https://www.mongodb.org/static/pgp/server-6.0.asc
+EOF
+
+sudo yum install -y mongodb-org
 
 # Start and enable MongoDB
 print_status "Starting MongoDB service..."
@@ -134,15 +140,39 @@ EOF
 sudo systemctl enable quantum-chess.service
 sudo systemctl start quantum-chess.service
 
-# Set up firewall (if ufw is available)
-if command -v ufw &> /dev/null; then
-    print_status "Configuring firewall..."
-    sudo ufw allow 22/tcp
-    sudo ufw allow 80/tcp
-    sudo ufw allow 443/tcp
-    sudo ufw allow 5000/tcp
-    sudo ufw --force enable
-fi
+# Set up firewall (Amazon Linux uses iptables, but we'll use security groups)
+print_status "Configuring security groups..."
+print_warning "Please ensure your EC2 security group allows ports 22, 80, 443, and 5000"
+
+# Install and configure nginx (optional for reverse proxy)
+print_status "Installing nginx..."
+sudo yum install -y nginx
+
+# Create nginx configuration
+print_status "Creating nginx configuration..."
+sudo tee /etc/nginx/conf.d/quantum-chess.conf << EOF
+server {
+    listen 80;
+    server_name _;
+
+    location / {
+        proxy_pass http://localhost:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
+    }
+}
+EOF
+
+# Start and enable nginx
+print_status "Starting nginx..."
+sudo systemctl start nginx
+sudo systemctl enable nginx
 
 # Health check
 print_status "Performing health check..."
@@ -166,17 +196,21 @@ echo "  PM2 Status: pm2 status"
 echo "  PM2 Logs: pm2 logs quantum-chess-api"
 echo "  Restart: pm2 restart quantum-chess-api"
 echo "  Stop: pm2 stop quantum-chess-api"
+echo "  Nginx Status: sudo systemctl status nginx"
+echo "  Nginx Logs: sudo tail -f /var/log/nginx/error.log"
 echo ""
 echo "🌐 Application URLs:"
 echo "  Health Check: http://$(curl -s ifconfig.me):5000/health"
 echo "  API Base: http://$(curl -s ifconfig.me):5000/api"
+echo "  Nginx Proxy: http://$(curl -s ifconfig.me)"
 echo ""
 echo "📁 Application Directory: /var/www/quantum-chess"
 echo "📝 Logs Directory: /var/www/quantum-chess/logs"
 echo ""
 print_warning "Don't forget to:"
 echo "  1. Edit .env file with your configuration"
-echo "  2. Set up SSL certificate (recommended)"
-echo "  3. Configure domain name (optional)"
-echo "  4. Set up monitoring and alerts"
+echo "  2. Configure EC2 security groups for ports 22, 80, 443, 5000"
+echo "  3. Set up SSL certificate with Let's Encrypt (recommended)"
+echo "  4. Configure domain name (optional)"
+echo "  5. Set up CloudWatch monitoring and alerts"
 echo "" 
