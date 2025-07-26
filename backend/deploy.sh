@@ -42,22 +42,42 @@ curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
 sudo yum install -y nodejs
 
 # Install MongoDB
-print_status "Installing MongoDB..."
-sudo tee /etc/yum.repos.d/mongodb-org-6.0.repo << EOF
-[mongodb-org-6.0]
-name=MongoDB Repository
-baseurl=https://repo.mongodb.org/yum/amazon/2/mongodb-org/6.0/x86_64/
-gpgcheck=1
-enabled=1
-gpgkey=https://www.mongodb.org/static/pgp/server-6.0.asc
-EOF
+print_status "Installing MongoDB using Docker (recommended for Amazon Linux 2)..."
 
-sudo yum install -y mongodb-org
+# Install Docker
+print_status "Installing Docker..."
+sudo yum install -y docker
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker $USER
 
-# Start and enable MongoDB
-print_status "Starting MongoDB service..."
-sudo systemctl start mongod
-sudo systemctl enable mongod
+# Create MongoDB data directory
+sudo mkdir -p /var/lib/mongodb
+sudo chown $USER:$USER /var/lib/mongodb
+
+# Run MongoDB in Docker
+print_status "Starting MongoDB in Docker container..."
+docker run -d \
+  --name mongodb \
+  --restart unless-stopped \
+  -p 27017:27017 \
+  -v /var/lib/mongodb:/data/db \
+  -e MONGO_INITDB_ROOT_USERNAME=admin \
+  -e MONGO_INITDB_ROOT_PASSWORD=quantumchess123 \
+  mongo:6.0
+
+# Wait for MongoDB to start
+print_status "Waiting for MongoDB to start..."
+sleep 10
+
+# Test MongoDB connection
+if docker exec mongodb mongosh --eval "db.runCommand('ping')" > /dev/null 2>&1; then
+    print_status "✅ MongoDB is running successfully!"
+else
+    print_error "❌ MongoDB failed to start"
+    print_status "Checking Docker logs..."
+    docker logs mongodb
+fi
 
 # Install PM2 globally
 print_status "Installing PM2..."
@@ -198,6 +218,9 @@ echo "  Restart: pm2 restart quantum-chess-api"
 echo "  Stop: pm2 stop quantum-chess-api"
 echo "  Nginx Status: sudo systemctl status nginx"
 echo "  Nginx Logs: sudo tail -f /var/log/nginx/error.log"
+echo "  MongoDB Status: docker ps | grep mongodb"
+echo "  MongoDB Logs: docker logs mongodb"
+echo "  MongoDB Shell: docker exec -it mongodb mongosh"
 echo ""
 echo "🌐 Application URLs:"
 echo "  Health Check: http://$(curl -s ifconfig.me):5000/health"
@@ -206,6 +229,7 @@ echo "  Nginx Proxy: http://$(curl -s ifconfig.me)"
 echo ""
 echo "📁 Application Directory: /var/www/quantum-chess"
 echo "📝 Logs Directory: /var/www/quantum-chess/logs"
+echo "🗄️ MongoDB Data: /var/lib/mongodb"
 echo ""
 print_warning "Don't forget to:"
 echo "  1. Edit .env file with your configuration"
@@ -213,4 +237,5 @@ echo "  2. Configure EC2 security groups for ports 22, 80, 443, 5000"
 echo "  3. Set up SSL certificate with Let's Encrypt (recommended)"
 echo "  4. Configure domain name (optional)"
 echo "  5. Set up CloudWatch monitoring and alerts"
+echo "  6. Change MongoDB password in production"
 echo "" 
